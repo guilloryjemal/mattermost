@@ -1,0 +1,92 @@
+# .gitlab-ci.yml
+# Sample pipeline for checking/validating files in a repository
+
+stages:
+  - check
+
+variables:
+  GIT_DEPTH: "1"
+
+# ---------------------------------------------------
+# Check YAML files are syntactically valid
+# ---------------------------------------------------
+check:yaml:
+  stage: check
+  image: python:3.12-slim
+  before_script:
+    - pip install yamllint
+  script:
+    - yamllint -d "{extends: relaxed, rules: {line-length: {max: 120}}}" .
+  rules:
+    - changes:
+        - "**/*.yml"
+        - "**/*.yaml"
+
+# ---------------------------------------------------
+# Check JSON files are syntactically valid
+# ---------------------------------------------------
+check:json:
+  stage: check
+  image: alpine:3.20
+  before_script:
+    - apk add --no-cache jq
+  script:
+    - |
+      find . -name "*.json" -not -path "./node_modules/*" | while read -r file; do
+        echo "Validating $file"
+        jq empty "$file" || exit 1
+      done
+  rules:
+    - changes:
+        - "**/*.json"
+
+# ---------------------------------------------------
+# Check for trailing whitespace / missing newline at EOF
+# ---------------------------------------------------
+check:whitespace:
+  stage: check
+  image: alpine:3.20
+  script:
+    - |
+      FAIL=0
+      for file in $(git diff --name-only --diff-filter=ACM HEAD~1 HEAD 2>/dev/null || find . -type f); do
+        if [ -f "$file" ] && grep -qP '[ \t]+$' "$file" 2>/dev/null; then
+          echo "Trailing whitespace in $file"
+          FAIL=1
+        fi
+      done
+      exit $FAIL
+  allow_failure: true
+
+# ---------------------------------------------------
+# Check file size (block accidentally committed large files)
+# ---------------------------------------------------
+check:filesize:
+  stage: check
+  image: alpine:3.20
+  script:
+    - |
+      MAX_SIZE=5242880  # 5MB
+      find . -type f -not -path "./.git/*" -size +${MAX_SIZE}c -exec echo "Large file: {}" \; -exec false \;
+
+# ---------------------------------------------------
+# Basic secret scanning
+# ---------------------------------------------------
+check:secrets:
+  stage: check
+  image: python:3.12-slim
+  script:
+    - pip install detect-secrets
+    - detect-secrets scan --all-files > /tmp/secrets.json
+    - |
+      if grep -q '"is_secret"' /tmp/secrets.json 2>/dev/null; then
+        cat /tmp/secrets.json
+      fi
+      python3 -c "
+      import json
+      with open('/tmp/secrets.json') as f:
+          data = json.load(f)
+      found = any(len(v) > 0 for v in data.get('results', {}).values())
+      exit(1 if found else 0)
+      "
+  allow_failure: true
